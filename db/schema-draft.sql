@@ -35,7 +35,8 @@ CREATE TABLE knowledge.source_domains (
     skill_domain     text        NOT NULL,
     PRIMARY KEY (source_id, skill_domain)
 );
-CREATE INDEX source_domains_skill_domain_idx ON knowledge.source_domains (skill_domain);
+-- text_pattern_ops so prefix filters work: skill_domain LIKE 'technology/%'
+CREATE INDEX source_domains_skill_domain_idx ON knowledge.source_domains (skill_domain text_pattern_ops);
 
 -- ---------------------------------------------------------------------------
 -- crawl_runs: one row per crawler or pipeline run. Per-crawl numbers (DE-07 duplicate
@@ -71,7 +72,7 @@ CREATE TABLE knowledge.documents (
     crawl_run_id     uuid        REFERENCES knowledge.crawl_runs (id) ON DELETE SET NULL,
     fetched_at       timestamptz NOT NULL,           -- exposed as retrieved_at in provenance; DE-09 freshness
     http_status      integer,
-    content_hash     text        NOT NULL,           -- sha256 hex of the raw fetched bytes
+    content_hash     text        NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),  -- sha256 hex of the raw fetched bytes
     license          text        NOT NULL DEFAULT 'unknown',  -- license as it was at fetch time
     pipeline_version text        NOT NULL,           -- version of clean/chunk code that last processed it (DE-05)
     title            text,
@@ -106,7 +107,9 @@ CREATE TABLE knowledge.chunks (
     chunk_index       integer     NOT NULL CHECK (chunk_index >= 0),
     text              text        NOT NULL,
     token_count       integer,
-    content_hash      text        NOT NULL,          -- sha256 hex of the chunk text
+    section           text[]      NOT NULL DEFAULT '{}',  -- heading path inside the page (from AI extraction)
+    concepts          text[]      NOT NULL DEFAULT '{}',  -- key concepts found in the chunk (from AI extraction)
+    content_hash      text        NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),  -- sha256 hex of the chunk text
     pipeline_version  text        NOT NULL,
     chunk_config      jsonb       NOT NULL DEFAULT '{}'::jsonb,  -- size, overlap, splitter: AI-owned values
     chunk_config_hash text        NOT NULL,          -- sha256 hex of chunk_config as canonical JSON (sorted keys)
@@ -116,20 +119,25 @@ CREATE TABLE knowledge.chunks (
 CREATE INDEX chunks_content_hash_idx ON knowledge.chunks (content_hash);
 
 -- ---------------------------------------------------------------------------
--- embeddings: one vector per (chunk, model, version). Dimension 384 is a contract
--- with the AI team. Changing the model means a new row, not an update.
+-- embeddings: one vector per (chunk, model version). Contract with AI (AI-11 handoff,
+-- 26 Oct 2026): model BAAI/bge-small-en-v1.5, 384 dimensions, L2-normalized, cosine.
+-- DE does not create these vectors; AI's embedding code does (see docs).
+-- A new model or dimension is a contract change approved by AI and DE, plus a rebuild.
 -- ---------------------------------------------------------------------------
 CREATE TABLE knowledge.embeddings (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     chunk_id          uuid        NOT NULL REFERENCES knowledge.chunks (id) ON DELETE CASCADE,
     embedding         vector(384) NOT NULL,
-    embedding_model   text        NOT NULL,
-    embedding_version text        NOT NULL,
+    embedding_model   text        NOT NULL
+                      CHECK (embedding_model = 'local/BAAI/bge-small-en-v1.5'),  -- exact string, with local/
+    embedding_version text        NOT NULL,          -- pinned model revision (see docs for the value)
     created_at        timestamptz NOT NULL DEFAULT now(),
+    -- Vectors must be unit length before writing; a small margin allows float32 rounding.
+    CONSTRAINT embeddings_unit_norm CHECK (abs(vector_norm(embedding) - 1) < 0.001),
     UNIQUE (chunk_id, embedding_model, embedding_version)
 );
--- PROVISIONAL until AI confirms cosine. Queries must also filter on model + version,
--- and then need SET hnsw.iterative_scan (see docs/data-architecture.md).
+-- FINAL (confirmed by AI): HNSW with cosine. Order by embedding <=> query; score = 1 - distance.
+-- Filtered queries need SET hnsw.iterative_scan (see docs/data-architecture.md).
 CREATE INDEX embeddings_hnsw_cosine_idx
     ON knowledge.embeddings USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
@@ -177,5 +185,37 @@ SELECT c.id            AS chunk_id,
 FROM knowledge.chunks c
 JOIN knowledge.documents d ON d.id = c.document_id
 JOIN knowledge.sources   s ON s.id = d.source_id
+WHERE d.is_current
+  AND d.duplicate_of IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- knowledge_chunks: the table AI's code expects (AI-11 handoff, section 3), built on top
+-- of our tables so their code can read it unchanged. Column names and types match their
+-- DDL exactly. Like retrievable_chunks it only shows current, non-duplicate documents.
+--
+-- Differences from a real table (see docs):
+--  * read-only: it is a join, so INSERT/UPDATE fail. Writes go to our tables.
+--  * one row per (chunk, skill_domain, embedding_version). A chunk whose source has
+--    several skill domains appears once per domain, so chunk_id is not unique here.
+--  * AI's own bootstrap (CREATE INDEX ... ON knowledge_chunks) fails on a view;
+--    their code must not run pg_schema() against this database.
+-- ---------------------------------------------------------------------------
+CREATE VIEW knowledge.knowledge_chunks AS
+SELECT c.id::text                              AS chunk_id,
+       s.url                                   AS source_url,
+       COALESCE(d.title, '')                   AS title,
+       (d.fetched_at AT TIME ZONE 'UTC')::date AS retrieved,
+       c.text                                  AS text,
+       c.section                               AS section,
+       c.concepts                              AS concepts,
+       c.content_hash::char(64)                AS content_hash,
+       sd.skill_domain                         AS domain,
+       e.embedding_model                       AS embedding_model,
+       e.embedding                             AS embedding
+FROM knowledge.embeddings e
+JOIN knowledge.chunks         c  ON c.id = e.chunk_id
+JOIN knowledge.documents      d  ON d.id = c.document_id
+JOIN knowledge.sources        s  ON s.id = d.source_id
+JOIN knowledge.source_domains sd ON sd.source_id = s.id
 WHERE d.is_current
   AND d.duplicate_of IS NULL;
