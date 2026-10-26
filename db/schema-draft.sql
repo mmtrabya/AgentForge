@@ -84,7 +84,8 @@ CREATE TABLE knowledge.documents (
                      CHECK (status IN ('fetched', 'cleaned', 'chunked', 'embedded', 'failed')),
     raw_object_key   text,                           -- object storage key (DE-03); NULL after raw expiry
     clean_object_key text,
-    raw_deleted_at   timestamptz,
+    raw_deleted_at   timestamptz,                    -- raw HTML is kept 30 days
+    clean_deleted_at timestamptz,                    -- clean text goes when a newer version replaces this one
     created_at       timestamptz NOT NULL DEFAULT now(),
     -- Re-running the crawler on unchanged content hits this and inserts nothing.
     UNIQUE (source_id, content_hash),
@@ -190,15 +191,17 @@ WHERE d.is_current
 
 -- ---------------------------------------------------------------------------
 -- knowledge_chunks: the table AI's code expects (AI-11 handoff, section 3), built on top
--- of our tables so their code can read it unchanged. Column names and types match their
--- DDL exactly. Like retrievable_chunks it only shows current, non-duplicate documents.
+-- of our tables so their code can read it. AI reads from this view only; our pipeline
+-- (DE-05) writes to our tables. Like retrievable_chunks it only shows current,
+-- non-duplicate documents.
 --
--- Differences from a real table (see docs):
---  * read-only: it is a join, so INSERT/UPDATE fail. Writes go to our tables.
---  * one row per (chunk, skill_domain, embedding_version). A chunk whose source has
---    several skill domains appears once per domain, so chunk_id is not unique here.
---  * AI's own bootstrap (CREATE INDEX ... ON knowledge_chunks) fails on a view;
---    their code must not run pg_schema() against this database.
+-- One row per chunk: a chunk can belong to several skill domains, so AI's `domain text`
+-- is replaced by `domains text[]` (agreed with AI; their final DDL is still to come and
+-- this view will be matched to it). If a chunk has several embedding versions at once,
+-- only the newest one is shown.
+--
+-- Read-only: it is a join. AI's own bootstrap (CREATE INDEX ... ON knowledge_chunks)
+-- fails on a view; their code must not run pg_schema() against this database.
 -- ---------------------------------------------------------------------------
 CREATE VIEW knowledge.knowledge_chunks AS
 SELECT c.id::text                              AS chunk_id,
@@ -209,13 +212,19 @@ SELECT c.id::text                              AS chunk_id,
        c.section                               AS section,
        c.concepts                              AS concepts,
        c.content_hash::char(64)                AS content_hash,
-       sd.skill_domain                         AS domain,
+       ARRAY(SELECT sd.skill_domain
+             FROM knowledge.source_domains sd
+             WHERE sd.source_id = s.id
+             ORDER BY sd.skill_domain)         AS domains,
        e.embedding_model                       AS embedding_model,
        e.embedding                             AS embedding
 FROM knowledge.embeddings e
-JOIN knowledge.chunks         c  ON c.id = e.chunk_id
-JOIN knowledge.documents      d  ON d.id = c.document_id
-JOIN knowledge.sources        s  ON s.id = d.source_id
-JOIN knowledge.source_domains sd ON sd.source_id = s.id
+JOIN knowledge.chunks    c ON c.id = e.chunk_id
+JOIN knowledge.documents d ON d.id = c.document_id
+JOIN knowledge.sources   s ON s.id = d.source_id
 WHERE d.is_current
-  AND d.duplicate_of IS NULL;
+  AND d.duplicate_of IS NULL
+  AND NOT EXISTS (SELECT 1
+                  FROM knowledge.embeddings newer
+                  WHERE newer.chunk_id = e.chunk_id
+                    AND (newer.created_at, newer.id) > (e.created_at, e.id));

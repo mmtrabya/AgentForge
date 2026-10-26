@@ -8,7 +8,8 @@ parses and its constraints behave as described below.
 This version includes the AI-to-DE embeddings handoff from Ziad Abdullah (AI-11, 26 October 2026,
 [ai-de-embeddings-handoff.pdf](ai-de-embeddings-handoff.pdf)). The two AI docs it points to
 (`ai/docs/ai/retrieval.md`, `ai/docs/ai/extraction.md`) are not on any GitHub branch yet, so nothing
-here relies on them.
+here relies on them. Ziad has answered our questions; this version applies his answers. Items still
+waiting for AI are listed under "Waiting for AI".
 
 All tables live in the Postgres schema `knowledge`, separate from Backend's application tables.
 
@@ -42,27 +43,67 @@ Three views:
 `host` is the web host (rate limits and robots.txt work per host). `skill_domain` is the skill's field
 (same vocabulary as SkillSpec `skill.domain`). They are different things and live in different tables.
 
+## Who writes, who reads, who owns migrations
+
+- **Writer: the DE pipeline (DE-05), and only it.** It calls AI's functions (`extract_page` and `embed`, or
+  `ingest_pages`) and inserts the results into our tables (`sources`, `documents`, `chunks`, `embeddings`).
+- **Reader: AI, through the view `knowledge_chunks` only.** AI connects as the role `skillforge_ai_reader`.
+- **Migrations are DE's responsibility.** DE writes them (Alembic) and keeps them in step with the schema contract
+  shared with Backend: a schema change still needs a pull request approved by the departments that consume it.
+  They reach staging through the normal release path (merge, then automatic deploy with migrations).
+
+### Read-only role `skillforge_ai_reader`
+
+Defined in [db/roles-local.sql](../db/roles-local.sql) for local development. It will be created on staging too,
+by a migration or ops script, with the password taken from the secret store and not from the repository.
+Production follows the release process.
+
+| Grant | Why |
+|---|---|
+| `CONNECT` on the database, `USAGE` on schema `knowledge` | needed to reach the view |
+| `SELECT` on `knowledge.knowledge_chunks`, nothing else | the view runs with its owner's rights, so the role needs no access to the tables behind it |
+| `search_path = knowledge, public` | `knowledge_chunks` resolves without a prefix. `public` is kept because the `vector` type and the `<=>` operator live there; with `knowledge` alone the operator fails (checked: `operator does not exist`) |
+
+Checked in the container inside a rolled-back transaction, acting as the role: it reads the view (3 of 3 rows) and
+runs a `<=>` similarity query on it; it is denied `SELECT` on `chunks`, `embeddings`, `sources` and
+`chunk_provenance`; it is denied `INSERT`, `UPDATE`, `DELETE` on the base tables and `CREATE TABLE` in `knowledge`
+and `public`. A write to the view itself fails with "cannot insert into view" (a join is not writable at all),
+before any permission check. The role was removed by the rollback; to create it locally run
+`docker exec -i skillforge-postgres psql -U skillforge -d skillforge < db/roles-local.sql` after the schema exists.
+
+If AI wants to use `ingest_pages()`, note that it writes its own `knowledge_chunks` table. Our pipeline must call
+it in a way that returns the data for us to insert (or call `extract_page` and `embed` separately), because the
+view cannot be written. To confirm when `retrieval.md` arrives.
+
+## Waiting for AI
+
+- The full `embedding_version`: the model revision that starts `aa8f8b06...` (the full pin is in AI's
+  `models.yaml`). Until then it is stored as whatever the pipeline passes in.
+- `ai/docs/ai/retrieval.md` and `ai/docs/ai/extraction.md`. They are not on GitHub yet.
+- The final `knowledge_chunks` DDL. When it arrives we compare it with the view and match it. Today the view
+  differs from the handoff DDL in one column: `domains text[]` instead of `domain text`, as agreed with AI.
+
 ## Embeddings contract with AI (final)
 
 | Item | Value |
 |---|---|
 | `embedding_model` | exactly `local/BAAI/bge-small-en-v1.5`, enforced by a CHECK. Another value is rejected. |
-| `embedding_version` | the pinned model revision of `Qdrant/bge-small-en-v1.5-onnx-Q`. The handoff gives only the start (`aa8f8b06...`); the full value is in AI's `ai/core/llm/models.yaml`, which we cannot see yet. Open question. |
+| `embedding_version` | the pinned model revision of `Qdrant/bge-small-en-v1.5-onnx-Q`. The handoff gives only the start (`aa8f8b06...`); the full value is in AI's `ai/core/llm/models.yaml`, which we cannot see yet. Waiting for AI. |
 | Dimension | 384, `vector(384)` |
 | Unit length | enforced by a CHECK: `abs(vector_norm(embedding) - 1) < 0.001`. A vector that is not L2-normalized is rejected. The margin only absorbs float32 rounding. (pgvector 0.8.7 names this function `vector_norm`; `l2_norm` exists only for halfvec and sparsevec.) |
 | Metric and index | cosine, HNSW with `vector_cosine_ops`. Final, no longer provisional. Order by `embedding <=> query`; score is `1 - (embedding <=> query)`. |
 
 **Our pipeline does not create embeddings.** It uses AI's embedding code (`ingest_pages()`, or the embedding
-function behind it; exact entry point to confirm with Ziad) so that every rule matches: passages are embedded as
+function behind it) so that every rule matches: passages are embedded as
 raw text with no prefix, the model file is pinned and checked by sha256, and vectors are normalized. DE only
 chooses when to run it, and stores and indexes the result. Duplicating that logic in our own code would put
 vectors in a different space and make search results silently wrong.
 
-**Search queries** (only queries, never passages) must start with this exact instruction, including the trailing
-space:
+**Search queries** (only queries, never passages) must start with this exact instruction. It ends with one space,
+so it is written here as a Python string literal, because editors strip trailing spaces from plain lines:
 
-```
-Represent this sentence for searching relevant passages:
+```python
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 ```
 
 Our retrieval code adds this prefix before the query text is embedded. The model and dimension are a contract:
@@ -71,8 +112,10 @@ changing either needs approval from AI and DE and a rebuild of the index.
 ## `knowledge_chunks`: the view AI's code reads
 
 AI's store interface expects a table `knowledge_chunks` with 11 columns. We keep our own normalized tables and
-expose that shape as a view, so their code can read from us without changes. Column names and types are
-identical to their DDL (checked by comparing both in the container: 11 columns, 0 differences).
+expose that shape as a view, so AI reads from us without writing anything. Column names and types match their
+handoff DDL, with one agreed change: a chunk can belong to several skill domains, so `domain text` became
+`domains text[]` and **each chunk appears once**. Checked by comparing the view with their DDL in the container:
+11 columns, 1 difference (position 9). AI will send the final DDL, and we will match it.
 
 | AI column | Comes from |
 |---|---|
@@ -82,36 +125,34 @@ identical to their DDL (checked by comparing both in the container: 11 columns, 
 | `retrieved date` | `documents.fetched_at` as a UTC date |
 | `text`, `section`, `concepts` | `chunks` |
 | `content_hash char(64)` | `chunks.content_hash` (sha256 hex of the chunk text; what AI's hash covers is an open question) |
-| `domain text` | `source_domains.skill_domain` |
+| `domains text[]` | all `source_domains.skill_domain` of the chunk's source, sorted; `{}` if none |
 | `embedding_model`, `embedding` | `embeddings` |
 
 Like `retrievable_chunks`, it only shows current, non-duplicate documents. What differs from a real table:
 
-1. **Read-only.** It is a join; an INSERT fails (checked). Writes go to our tables. Who writes is an open question.
-2. **`chunk_id` is not unique in it.** AI's `domain` holds one value per row, but a source can have several skill
-   domains. A chunk then appears once per domain (checked: two rows, same `chunk_id`). A domain-filtered search is
-   right; a search without a domain filter can see the same chunk twice.
+1. **Read-only.** It is a join; an INSERT fails (checked). The DE pipeline writes to our tables.
+2. **One row per chunk.** If a chunk has several embedding versions at once, only the newest is shown
+   (checked: 2 versions each, 3 rows in the view, all `rev2`).
 3. **AI's bootstrap DDL fails on it.** Their `pg_schema()` runs `CREATE TABLE IF NOT EXISTS knowledge_chunks`
    (skipped, the name exists) and then `CREATE INDEX ... ON knowledge_chunks`, which errors because it is a view
    (checked). Their code must not run `pg_schema()` against this database.
-4. **Name lookup.** The view lives in the `knowledge` schema. Their code reads the unqualified name, so their
-   connection needs `search_path = knowledge` (checked: an unqualified read then works). This is a connection or
-   role setting, not a code change.
-5. **No ANN speed-up through the view.** A domain-filtered query on the view returns the right rows, but the
-   planner does not use the HNSW index: it joins first and sorts, which is an exact scan of the matching chunks.
-   Fine when a domain is small; for a large one, query `embeddings` directly (see below). DE-02 should measure the
-   latency on the 1M-chunk set and decide whether a real table or a materialized view is needed.
+4. **No ANN speed-up through the view.** A query on the view returns the right rows, but the planner does not use
+   the HNSW index: it joins first and sorts, which is an exact scan of the matching chunks. Also, `domains` is
+   computed per row, so a filter such as `'technology/ai' = ANY(domains)` cannot use the index on
+   `source_domains`. Fine for a small store; for a large one the retrieval path should query the tables directly
+   (filter with `EXISTS` on `source_domains`, then order by `embedding <=> query`). DE-02 should measure latency on
+   the 1M-chunk set and decide whether a real table or a materialized view is needed.
 
 ## How the table design serves the later tasks
 
 | Task | What the schema gives it |
 |---|---|
-| DE-05 idempotency | The pipeline calls AI's embedding code; it does not embed on its own. `documents` is unique on `(source_id, content_hash)`; `chunks` on `(document_id, chunk_index, chunk_config_hash)`; `embeddings` on `(chunk_id, embedding_model, embedding_version)`. Re-runs use `ON CONFLICT DO NOTHING`. |
+| DE-05 idempotency | The pipeline is the only writer. It calls AI's code (`extract_page`, `embed`, or `ingest_pages`) and does not embed on its own. `documents` is unique on `(source_id, content_hash)`; `chunks` on `(document_id, chunk_index, chunk_config_hash)`; `embeddings` on `(chunk_id, embedding_model, embedding_version)`. Re-runs use `ON CONFLICT DO NOTHING`. |
 | DE-06 provenance | Chunk → document → source gives `url`, `fetched_at` (as `retrieved_at`), `license`, `content_hash`. The license is the copy stored on the document at fetch time, so it does not change if the source's license changes later. |
 | DE-07 dedup and language | `documents.language`, `documents.minhash` (datasketch signature), `documents.duplicate_of`. Exact duplicates are found by `content_hash`; near duplicates by MinHash. `crawl_runs.pages_duplicate` gives the duplicate rate per crawl. |
 | DE-09 domain cache | See below. |
 | DE-04 crawler | `sources.robots_allowed`, `robots_checked_at`, and `crawl_runs.user_agent`, `config`, `pages_blocked`. |
-| DE-03 storage | `raw_object_key` and `clean_object_key` point to object storage; raw can expire (`raw_deleted_at`) without losing the document row. |
+| DE-03 storage | `raw_object_key` and `clean_object_key` point to object storage; raw expires after 30 days (`raw_deleted_at`) and clean text is removed when a newer version of the page replaces it (`clean_deleted_at`), without losing the document row. |
 | DE-11 monitoring | `crawl_runs.status` and counters make "failed or empty run" a simple query. |
 
 ### DE-09 cache lookup
@@ -179,8 +220,8 @@ BEGIN;
 SET LOCAL hnsw.iterative_scan = relaxed_order;
 SELECT e.chunk_id
 FROM knowledge.embeddings e
-WHERE e.embedding_model = $1 AND e.embedding_version = $2
-ORDER BY e.embedding <=> $3
+WHERE e.embedding_version = $1
+ORDER BY e.embedding <=> $2
 LIMIT 10;
 COMMIT;
 ```
@@ -190,12 +231,12 @@ order matters, or use `strict_order`. `hnsw.max_scan_tuples` (default 20,000) ca
 This was checked on random data only, so recall and the latency target are still for DE-02 to measure on real
 data.
 
-## Retention (PROPOSED, values need agreement with BE and DevOps)
+## Retention (raw 30 days and the clean-text rule are agreed with AI; the rest is PROPOSED and needs BE and DevOps)
 
 | Data | Where | Keep | Then |
 |---|---|---|---|
-| Raw page bytes | object storage | 30 days after `fetched_at` | Delete object, set `raw_deleted_at`; keep the document row |
-| Clean text | object storage | While the document is current, and 90 days after it is superseded | Delete |
+| Raw HTML | object storage | 30 days after `fetched_at` | Delete object, set `raw_deleted_at`; keep the document row |
+| Clean text | object storage | Until the page is crawled again and a newer version is stored (not a fixed number of days) | Delete the old version's object, set `clean_deleted_at` |
 | Superseded documents (`is_current = false`) | `documents` | 90 days | Delete row; chunks and embeddings cascade |
 | Chunks and embeddings of a current document | `chunks`, `embeddings` | While the document exists | Cascade with the document |
 | Old `embedding_version` rows | `embeddings` | 30 days after a newer version is fully backfilled | Delete |
@@ -210,30 +251,22 @@ columns here.
 
 ## Open questions
 
-Answered by the AI handoff and removed: cosine as the metric, and more than one embedding model at once
-(one model, fixed).
+Answered by AI and removed: cosine as the metric; one embedding model; a chunk can have several domains; who
+writes (the DE pipeline); which AI functions to call; role and `search_path` for AI; migrations are DE's. Items
+that depend on files from AI are under "Waiting for AI" above.
 
 **For AI (Ziad)**
-1. Does a chunk have one `domain` or several? Our model allows several skill domains per source; the
-   `knowledge_chunks` view then repeats the chunk once per domain. If one is enough, which one is it?
-2. Who writes to the tables: our pipeline (we call your embedding code and insert into our tables) or
-   `ingest_pages()` directly? `ingest_pages()` expects to write a real `knowledge_chunks` table, and the view is
-   read-only. If you write, you can write to our `chunks` and `embeddings` instead.
-3. What is the full `embedding_version` value (the revision starting `aa8f8b06...`, in `models.yaml`)? We store it
-   as is.
-4. What does your `content_hash` cover: the chunk text, or the whole page? We store the chunk text hash.
-5. Is `domain` hierarchical (`technology/ai`, matched with `LIKE 'technology/%'`)? Your index uses
-   `text_pattern_ops`, so we assume yes and use the same index type. Who owns the list of valid values?
-6. Are the `chunk_config` keys (size, overlap, splitter) free-form or fixed? We hash the whole object.
-7. Should `pipeline_version` be part of what makes a chunk set unique (decision 4)?
-8. Which exact function embeds passages and queries, so our pipeline calls it and nothing else? Please push
-   `ai/docs/ai/retrieval.md` and `extraction.md`; they are not on GitHub yet.
+1. What does your `content_hash` cover: the chunk text, or the whole page? We store the chunk text hash.
+2. Is a skill domain hierarchical (`technology/ai`, matched with a prefix)? Your old index used
+   `text_pattern_ops`. With `domains text[]`, how will you filter: exact value in the array, or prefix? Who owns
+   the list of valid values?
+3. Are the `chunk_config` keys (size, overlap, splitter) free-form or fixed? We hash the whole object.
+4. Should `pipeline_version` be part of what makes a chunk set unique (decision 4)?
 
 **For BE**
-1. Is a separate `knowledge` schema acceptable, and who owns migrations (Alembic) and runs them on staging?
+1. Is a separate `knowledge` schema acceptable next to your application tables?
 2. Does Backend need to read these tables directly, or only through the retrieval API?
 3. Do the retention numbers fit storage cost and any legal limits? Who confirms the agreed deletion time for DE-13?
-4. Can the AI service's database role get `search_path = knowledge` (needed to read `knowledge_chunks` unqualified)?
 
 **For both**
 1. `source_type` is `web_page`, `skill_md`, `repo_file`. Is another type needed for the repository analysis in the spec?
