@@ -63,6 +63,7 @@ logs/metrics for new jobs, docs updated, "Done when" check passes.
 - Small, clear commits: "DE-01: add sources and documents tables".
 - Never commit .venv, .env, secrets, or data files.
 - When the task is done, push the branch and I open the pull request.
+- Pull requests target Master, with at least one reviewer.
 
 ## Working style
 - Explain to me in Egyptian Arabic; code, comments and commits in English.
