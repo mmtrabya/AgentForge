@@ -50,7 +50,7 @@ P5 After launch
 - Analytics event schema (consumers: FE, BE).
 - Embedding dimension: 384 (confirmed by the AI team). The `embeddings` table uses `vector(384)`
   and has `embedding_model` and `embedding_version` columns. The index is HNSW with
-  `vector_cosine_ops`, provisional until the AI team confirms the distance metric.
+  `vector_cosine_ops` (metric confirmed final by the AI team).
 
 ## Definition of Done (every task)
 Tests added, lint + type checks pass, no secrets or personal data in code/logs,
@@ -58,12 +58,12 @@ logs/metrics for new jobs, docs updated, "Done when" check passes.
 
 ## Git rules
 - Never commit or push to main/master.
-- One branch per task, named after the task ID (e.g. de-01-knowledge-schema).
+- All work happens on the branch `mohanad`. Do not create a branch per task.
+- Keep commits small and prefix each with the task ID, e.g. "DE-01: add sources and documents tables".
 - Before committing: run tests, show me git status and the diff, wait for my OK.
-- Small, clear commits: "DE-01: add sources and documents tables".
 - Never commit .venv, .env, secrets, or data files.
-- When the task is done, push the branch and I open the pull request.
-- Pull requests target Master, with at least one reviewer.
+- Push `mohanad` regularly (`git push`).
+- When the work is done, I open a Pull Request from `mohanad` to `Data-Engineering` with at least one reviewer.
 
 ## Working style
 - Explain to me in Egyptian Arabic; code, comments and commits in English.
