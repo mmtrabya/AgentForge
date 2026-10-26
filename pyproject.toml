@@ -23,3 +23,6 @@ dev = ["pytest>=8", "ruff>=0.5"]
 
 [tool.setuptools]
 packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
