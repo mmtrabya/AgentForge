@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "AutonomySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Level",
+          "type": "string"
+        }
+      },
+      "title": "AutonomySpec",
+      "type": "object"
+    },
+    "ConstraintsSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "ConstraintsSpec",
+      "type": "object"
+    },
+    "QualitySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "criteria": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Criteria",
+          "type": "array"
+        }
+      },
+      "title": "QualitySpec",
+      "type": "object"
+    },
+    "WorkflowSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "title": "WorkflowSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "runtime": {
+      "enum": [
+        "python",
+        "node",
+        "container"
+      ],
+      "title": "Runtime",
+      "type": "string"
+    },
+    "entrypoint": {
+      "minLength": 1,
+      "title": "Entrypoint",
+      "type": "string"
+    },
+    "tools": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tools",
+      "type": "array"
+    },
+    "environment": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Environment",
+      "type": "object"
+    },
+    "config": {
+      "additionalProperties": true,
+      "title": "Config",
+      "type": "object"
+    },
+    "constraints": {
+      "$ref": "#/$defs/ConstraintsSpec"
+    },
+    "workflow": {
+      "$ref": "#/$defs/WorkflowSpec"
+    },
+    "quality": {
+      "$ref": "#/$defs/QualitySpec"
+    },
+    "autonomy": {
+      "$ref": "#/$defs/AutonomySpec"
+    }
+  },
+  "required": [
+    "name",
+    "runtime",
+    "entrypoint"
+  ],
+  "title": "AgentSpec",
+  "type": "object"
+}

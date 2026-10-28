@@ -81,4 +81,28 @@ def test_agent_definition_defaults():
     assert definition.agent.autonomy.level == "medium"
     assert definition.agent.constraints.rules == []
     assert definition.agent.workflow.steps == []
-    assert definition.agent.quality.criteria == []
+    assert definition.agent.quality.criteria == [] 
+
+def test_whitespace_only_agent_name_is_rejected():
+    with pytest.raises(ValidationError):
+        AgentSpec(**{**valid_agent_data(), "name": "   "})
+
+
+def test_whitespace_only_entrypoint_is_rejected():
+    with pytest.raises(ValidationError):
+        AgentSpec(**{**valid_agent_data(), "entrypoint": "   "})
+
+
+def test_duplicate_tools_are_rejected():
+    with pytest.raises(ValidationError):
+        AgentSpec(**{**valid_agent_data(), "tools": ["search", "search"]})
+
+
+def test_invalid_environment_variable_name_is_rejected():
+    with pytest.raises(ValidationError):
+        AgentSpec(
+            **{
+                **valid_agent_data(),
+                "environment": {"INVALID-NAME": "value"},
+            }
+        )
